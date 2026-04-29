@@ -4,8 +4,7 @@
    =============================================================== */
 
 #include <stdio.h>           // Entrada e saída (printf)
-#include <pthread.h>         // Biblioteca para criar e gerenciar threads
-#include <sys/time.h>        // Função gettimeofday() para medir tempo com precisão
+#include <windows.h>         // API do Windows para threads e funções de timing
 
 /* ============ DEFINIÇÕES DE CONSTANTES ============ */
 #define SIZE 100000000       // Tamanho do vetor: 100 MILHÕES de elementos
@@ -16,13 +15,14 @@ int vetor[SIZE];                    // Array gigante que será preenchido com da
 long long soma_parcial[NUM_THREADS]; // Armazena a soma parcial calculada por cada thread
 
 /* ============ FUNÇÃO: MEDIR TEMPO ============
-   Retorna o tempo atual do sistema em segundos (com precisão de microsegundos)
+   Retorna o tempo atual do sistema em segundos (com alta precisão)
    Usada para cronometrar o tempo de execução dos cálculos
 */
 double get_time() {
-    struct timeval tv;                      // Estrutura para armazenar hora
-    gettimeofday(&tv, NULL);               // Pega a hora atual do sistema
-    return tv.tv_sec + tv.tv_usec / 1000000.0;  // Converte para segundos (float)
+    LARGE_INTEGER frequency, counter;       // Estruturas para contadores de performance
+    QueryPerformanceFrequency(&frequency);  // Obtém frequência do contador de performance
+    QueryPerformanceCounter(&counter);      // Obtém valor atual do contador
+    return (double)counter.QuadPart / (double)frequency.QuadPart;  // Converte para segundos
 }
 
 /* ============ FUNÇÃO: SOMAR VETOR (TAREFA DE CADA THREAD) ============
@@ -30,11 +30,11 @@ double get_time() {
    Cada thread calcula a soma de uma "fatia" do vetor, não do vetor inteiro.
    
    Argumentos:
-   - arg: ponteiro para o ID da thread (qual thread está executando)
+   - lpParam: ponteiro para o ID da thread (qual thread está executando)
 */
-void* somar_vetor(void* arg) {
+DWORD WINAPI somar_vetor(LPVOID lpParam) {
     // Converte o argumento genérico para inteiro (ID da thread)
-    int id = *((int*)arg);
+    int id = *((int*)lpParam);
     
     // PASSO 1: Calcular qual "fatia" do vetor esta thread vai processar
     int tamanho_fatia = SIZE / NUM_THREADS;  // Divide o vetor em 4 partes iguais
@@ -52,8 +52,8 @@ void* somar_vetor(void* arg) {
     // PASSO 3: Armazenar resultado no array global (índice = ID da thread)
     soma_parcial[id] = soma_local;
 
-    // Retorna NULL (convenção para threads em C)
-    return NULL;
+    // Retorna 0 (sucesso na thread do Windows)
+    return 0;
 }
 
 /* ============ FUNÇÃO PRINCIPAL ============ */
@@ -75,34 +75,49 @@ int main() {
     }
 
     double tempo_seq = get_time() - start_seq;  // Calcula tempo gasto
-    printf("Soma: %lld | Tempo: %f segundos\n", soma_seq, tempo_seq);
+    printf("Soma: %I64d | Tempo: %f segundos\n", soma_seq, tempo_seq);
 
     // ===== ETAPA 3: CÁLCULO PARALELO (4 threads) =====
     printf("\nCalculando modo Paralelo (4 Threads)...\n");
     double start_par = get_time();  // Marca tempo inicial
 
     // Cria as estruturas para armazenar as threads e seus IDs
-    pthread_t threads[NUM_THREADS];      // Identificadores das threads
-    int ids_threads[NUM_THREADS];        // ID de cada thread (0, 1, 2, 3)
+    HANDLE threads[NUM_THREADS];     // Handles (identificadores) das threads do Windows
+    int ids_threads[NUM_THREADS];    // ID de cada thread (0, 1, 2, 3)
 
     // PASSO A: Criar 4 threads, cada uma com um ID diferente
     for (int i = 0; i < NUM_THREADS; i++) {
         ids_threads[i] = i;
-        // pthread_create cria uma nova thread que executa a função somar_vetor
-        pthread_create(&threads[i], NULL, somar_vetor, &ids_threads[i]);
+        // CreateThread cria uma nova thread que executa a função somar_vetor
+        threads[i] = CreateThread(
+            NULL,                   // Atributos de segurança padrão
+            0,                      // Tamanho de stack padrão
+            somar_vetor,            // Função a ser executada
+            &ids_threads[i],        // Argumento (ID da thread)
+            0,                      // Flags (executar imediatamente)
+            NULL                    // Pointer para ID da thread (não usado aqui)
+        );
+
+        if (threads[i] == NULL) {
+            printf("Erro ao criar thread %d\n", i);
+            return 1;
+        }
     }
 
     // PASSO B: Aguardar que TODAS as threads terminem
+    // WaitForMultipleObjects espera por TODOS os handles (threads)
+    WaitForMultipleObjects(NUM_THREADS, threads, TRUE, INFINITE);
+
+    // Somar todos os resultados parciais
     long long soma_total_paralela = 0;
     for (int i = 0; i < NUM_THREADS; i++) {
-        // pthread_join bloqueia até a thread i terminar sua execução
-        pthread_join(threads[i], NULL);
-        // Soma todos os resultados parciais
         soma_total_paralela += soma_parcial[i];
+        // Fechar o handle da thread (liberar recursos)
+        CloseHandle(threads[i]);
     }
 
     double tempo_par = get_time() - start_par;  // Calcula tempo gasto
-    printf("Soma: %lld | Tempo: %f segundos\n", soma_total_paralela, tempo_par);
+    printf("Soma: %I64d | Tempo: %f segundos\n", soma_total_paralela, tempo_par);
 
     // ===== ETAPA 4: COMPARAÇÃO DOS RESULTADOS =====
     double speedup = tempo_seq / tempo_par;  // Calcula quantas vezes mais rápido foi
